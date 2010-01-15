@@ -21,7 +21,10 @@
  */
 package org.jboss.deployer.flow;
 
+import org.jboss.dependency.plugins.AbstractController;
+import org.jboss.dependency.spi.Controller;
 import org.jboss.deployers.plugins.deployers.DeployerWrapper;
+import org.jboss.deployers.plugins.deployers.DeployersImpl;
 import org.jboss.deployers.spi.deployer.Deployer;
 import org.jboss.deployers.spi.deployer.DeploymentStages;
 import org.jboss.deployers.spi.deployer.helpers.AbstractDeployer;
@@ -36,15 +39,17 @@ import java.util.Collection;
  */
 public class SimpleTestCase
 {
-   private void addDeployer(Collection<Deployer> main, Deployer deployer)
+   private void addDeployer(DeployersImpl main, Deployer deployer)
    {
-      main.add(new DeployerWrapper(deployer));
+      main.addDeployer(deployer);
+//      main.add(new DeployerWrapper(deployer));
    }
 
    @Test
    public void test1() throws IOException
    {
-      Collection<Deployer> main = new ArrayList<Deployer>();
+      Controller controller = new AbstractController();
+      DeployersImpl main = new DeployersImpl(controller);
       AbstractDeployer deployer;
       long start = System.currentTimeMillis();
 

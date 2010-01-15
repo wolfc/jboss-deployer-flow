@@ -27,10 +27,14 @@ import org.jboss.deployers.plugins.deployers.DeployerWrapper;
 import org.jboss.deployers.plugins.deployers.DeployersImpl;
 import org.jboss.deployers.plugins.main.MainDeployerImpl;
 import org.jboss.deployers.spi.deployer.Deployer;
+import org.jboss.deployers.spi.deployer.DeploymentStage;
+import org.jboss.deployers.spi.deployer.DeploymentStages;
 
 import java.io.*;
-import java.util.Collection;
-import java.util.Set;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.*;
 
 /**
  * @author <a href="cdewolf@redhat.com">Carlo de Wolf</a>
@@ -45,31 +49,37 @@ public class FlowGeneratorImpl implements FlowGenerator
    public void generate(String outputFileName) throws IOException
    {
       // Ales is going to love this
-      DeployersImpl deployersHolder = (DeployersImpl) mainDeployer.getDeployers();
-      Set<DeployerWrapper> deployers = deployersHolder.getDeployerWrappers();
+      DeployersImpl deployersImpl = (DeployersImpl) mainDeployer.getDeployers();
+      Set<DeployerWrapper> deployers = deployersImpl.getDeployerWrappers();
 
-      generate(deployers, outputFileName);
+      generate(deployersImpl, outputFileName);
    }
 
-   protected void generate(Collection<? extends Deployer> deployers, String outputFileName) throws IOException
+   protected String findDeployerWithOutput(List<Deployer> deployers, String output)
    {
-      KahnSorterHelper.Graph graph = helper.create(deployers);
+      for(int i = (deployers.size() - 1); i >= 0; i--)
+      {
+         Deployer deployer = deployers.get(i);
+         if(deployer.getOutputs().contains(output))
+            return deployer.toString();
+      }
+      return null;
+   }
 
+   protected void generate(DeployersImpl deployersImpl, String outputFileName) throws IOException
+   {
       File file = new File(outputFileName);
       PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter(file)));
       try
       {
          // a nameless directed graph
          out.println("digraph {");
-         out.println("\tsize=\"128,128\";");
-         for(KahnSorterHelper.Node node : graph.nodes.values())
-         {
-            out.println("\t" + name(node.getName())  + ";");
-         }
-         for(KahnSorterHelper.Edge edge : graph.edges)
-         {
-            out.println("\t" + name(edge.getFrom()) + " -> " + name(edge.getTo()) + "[ label = \"" + name(edge.getLabel()) + "\" ];");
-         }
+         out.println("\tsize=\"256,128\";");
+         // allow edges between clusters
+         out.println("\tcompound=\"true\";");
+
+         out.println("\trankdir=\"TB\";");
+         process(deployersImpl, DeploymentStages.INSTALLED, out, 0);
          out.println("}");
          out.flush();
       }
@@ -79,12 +89,116 @@ public class FlowGeneratorImpl implements FlowGenerator
       }
    }
 
+   protected List<Deployer> getDeployersList(DeployersImpl obj, String stageName)
+   {
+      try
+      {
+         Method method = DeployersImpl.class.getDeclaredMethod("getDeployersList", String.class);
+         method.setAccessible(true);
+         return (List<Deployer>) method.invoke(obj, stageName);
+      }
+      catch(NoSuchMethodException e)
+      {
+         throw new RuntimeException(e);
+      }
+      catch(InvocationTargetException e)
+      {
+         throw new RuntimeException(e);
+      }
+      catch(IllegalAccessException e)
+      {
+         throw new RuntimeException(e);
+      }
+   }
+
+   protected DeploymentStage getDeploymentStage(DeployersImpl deployersImpl, String stageName)
+   {
+      try
+      {
+         Field field = DeployersImpl.class.getDeclaredField("stages");
+         field.setAccessible(true);
+         Map<String, DeploymentStage> stages = (Map<String, DeploymentStage>) field.get(deployersImpl);
+         return stages.get(stageName);
+      }
+      catch(NoSuchFieldException e)
+      {
+         throw new RuntimeException(e);
+      }
+      catch(IllegalAccessException e)
+      {
+         throw new RuntimeException(e);
+      }
+   }
+
    private String name(String s)
    {
       int i = s.lastIndexOf(".");
       if(i > 0)
          return s.substring(i + 1).replace("@", "_");
       return s.replace("@", "_");
+   }
+
+   private void process(DeployersImpl deployersImpl, DeploymentStage stage, PrintWriter out, int clusterNum)
+   {
+      String after = stage.getAfter();
+      if(after != null)
+      {
+         process(deployersImpl, getDeploymentStage(deployersImpl, after), out, clusterNum + 1);
+      }
+      out.println("\tsubgraph cluster" + clusterNum + " {");
+      out.println("\t\tlabel=\"" + stage.getName() + "\";");
+      out.println("\t\trankdir=\"LR\";");
+//      out.println("\t\tlayout=\"dot\";");
+      out.println("\t\tclusterX" + clusterNum + " [style=\"invis\"]");
+
+      Set<String> connectedInputs = new HashSet<String>();
+      List<String> globalEdges = new ArrayList<String>();
+      
+      List<Deployer> deployers = getDeployersList(deployersImpl, stage.getName());
+      for(int i = 0; i < deployers.size(); i++)
+      {
+         Deployer deployer = deployers.get(i);
+         String deployerName = name(deployer.toString());
+         out.println("\t\t" + deployerName + ";");
+
+         Set<String> outputs = deployer.getOutputs();
+         for(String output : outputs)
+         {
+            for(int j = i + 1; j < deployers.size(); j++)
+            {
+               Deployer other = deployers.get(j);
+               if(other.getInputs().contains(output))
+               {
+                  out.println("\t\t" + deployerName + " -> " + name(other.toString()) + " [ label = \"" + name(output) + "\" ];");
+                  // if the other deployer has the same output, we'll continue flow from there
+                  if(other.getOutputs().contains(output))
+                     j = deployers.size();
+               }
+            }
+         }
+
+         /* TODO: hook up the outputs of previous stages
+         Set<String> inputs = deployer.getInputs();
+         for(String input : inputs)
+         {
+            if(!connectedInputs.contains(input))
+            {
+               connectedInputs.add(input);
+               if(after != null)
+               {
+                  String previousDeployerName = findDeployerWithOutput(getDeployersList(deployersImpl, after), input);
+                  if(previousDeployerName != null)
+                     globalEdges.add("\t" + name(previousDeployerName) + " -> " + deployerName + ";");
+               }
+            }
+         }
+         */
+      }
+      out.println("\t};");
+      for(String s : globalEdges)
+         out.println(s);
+      if(after != null)
+         out.println("\tclusterX" + (clusterNum + 1) + " -> clusterX" + clusterNum + " [ltail=cluster" + (clusterNum + 1) + ",lhead=cluster" + clusterNum + "];");
    }
 
    @Inject
